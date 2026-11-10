@@ -1,0 +1,476 @@
+﻿#import "PAT.Lib.Queue"; 
+#import "PAT.Lib.Array"; 
+#import "PAT.Lib.NBIoT";
+
+#define UE 2;  
+#define SM 1;  
+#define IOTP 1;  // 添加IOTP定义
+#define AS 1;
+
+#define NonceNum 5;  
+#define MAX_SEQ_GAP 5;  // 最大FCnt间隔，防止重放攻击
+enum{Attach_Request,Attach_Accept,AesEncrypt,AesDecrypt};
+enum{AttachType,AccessParameters,TimingAdvance,CellConfig,ConfirmData,Response,ChangeData};
+
+channel ComUC[UE*SM] 0;  
+channel ComSI[SM*IOTP] 0;  // SM和IOTP之间的通信通道
+channel ComIA[IOTP*AS] 0;  // IOTP和AS之间的通信通道
+channel FakeIU[UE] 0;
+channel FakeIC[SM] 0;
+channel FakeII[IOTP] 0;  // IOTP的伪造通道
+channel FakeIA[AS] 0;
+
+var oldDevNonce=-1;
+var DevNonce=0;
+var AttachNonce=0;
+var SMDevNonce=0;
+var UEAttachNonce=0;
+var UESeqUp[UE]=[5,0];
+var UESeqDown[UE]=[0,0];
+var CNSeqUp[UE]=[5,0];
+var CNSeqDown[UE]=[0,0];
+var ConfSeq[UE]=[0,0];
+var MAC1[4];
+var MAC1_1[4];
+var array[4]=[1,2,3,4];
+var MAC2[4];
+var MAC2_1[4];
+var MAC3[4];
+var MAC3_1[4];
+var MAC4[4];
+var MAC4_1[4];
+var MAC5[4];  // 添加MAC5用于IOTP
+var MAC5_1[4];  // 添加MAC5_1用于IOTP
+var FakeMAC3[4];
+var check_MAC1 = true;
+var check_MAC2 = true;
+var check_MAC3 = true;
+var check_MAC4 = true;
+var check_MAC5 = true;  // 添加check_MAC5
+var check_DevNonce = true;  
+var check_AttachNonce = true; 
+var check_sessionKey = true;
+var availability = false;
+var check_Seq = true;
+var attach_success = false;
+var successdataleakage = false; 
+var successreplayattack = false;
+var successdosattack = false;
+var successbitflipattack = false;
+var successresponsespoofattack = false;
+var successmitmattack = false;
+var successtamperingattack = false;
+var tamperingattack_detected = false; // 添加检测到篡改攻击的变量
+
+var AppSKey[16];
+var FNwkSIntKey[16];
+var SNwkSIntKey[16];
+var NwkSEncKey[16];
+
+var AppSKey_SM[16];
+var FNwkSIntKey_SM[16];
+var SNwkSIntKey_SM[16];
+var NwkSEncKey_SM[16];
+var SMIntKey[16];
+
+// 添加IOTP的相关会话密钥
+var AppSKey_IOTP[16];
+var NwkSKey_IOTP[16];
+
+var AttachEUI[AS] = [1];
+var IMSI[UE] = [1,2];
+var NetID[SM] = [1];
+var TMSI[UE] = [3,4];
+var LongTermKey[UE]=[0,1];
+var NwkKey[UE]=[3,4];
+var cond1;
+var cond2;
+var cond3;
+var cond4;
+var a=5;
+var b=5;
+var c=5;
+var tamperedSeq = 0; // 添加变量用于篡改攻击
+
+/*Model Attach Procedure*/
+//Model end-device during Attach Procedure
+UE_Attach(i,j,k,InturderCond) = IncreaseDevNonce{DevNonce++;}
+                -> Compute_mac1{MAC1=call(Aes128_cmac,NwkKey[i],[AttachEUI[k],IMSI[i],DevNonce],3)}
+                -> if (InturderCond) {UE_Attach_fake(i,j,k,DevNonce,MAC1)} else {UE_Attach_com(i,j,k,DevNonce,MAC1)};
+                
+UE_Attach_com(i,j,k,devnonce,mac1) = ComUC[j+i*SM]!Attach_Request.AttachEUI[k].IMSI[i].DevNonce.mac1 -> (UE_Attach_com_2(i,j,k,DevNonce) [] Skip);
+UE_Attach_fake(i,j,k,devnonce,mac1) = FakeIU[i]!Attach_Request.AttachEUI[k].IMSI[i].DevNonce.MAC1 -> (UE_Attach_fake_2(i,j,k,DevNonce) [] Skip); 
+             
+UE_Attach_com_2(i,j,k,devnonce) = ComUC[j+i*SM]?Attach_Accept.AesDecrypt.attachnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2 
+                            -> Check_AttachNonce{if(attachnonce > UEAttachNonce){check_AttachNonce=true;UEAttachNonce=attachnonce}else{check_AttachNonce=false};}
+                            -> if(check_AttachNonce==true){UE_Attach_3(i,j,k,devnonce,attachnonce,netid,tmsi,accessparameters,timingadvance,cellconfig,mac2)}else{Skip};                 
+UE_Attach_fake_2(i,j,k,devnonce)= FakeIU[i]?Attach_Accept.AesDecrypt.attachnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2 
+                           -> Check_AttachNonce{if(attachnonce > UEAttachNonce){check_AttachNonce=true;UEAttachNonce=attachnonce}else{check_AttachNonce=false};}
+                           -> if(check_AttachNonce==true){UE_Attach_3(i,j,k,devnonce,attachnonce,netid,tmsi,accessparameters,timingadvance,cellconfig,mac2)}else{Skip};
+                        
+UE_Attach_3(i,j,k,devnonce,attachnonce,netid,tmsi,accessparameters,timingadvance,cellconfig,mac2) = 
+                                Compute_mac2_1{MAC2_1=call(Aes128_cmac2,SMIntKey,[AttachType,AttachEUI[k],devnonce,attachnonce,netid,tmsi,accessparameters,timingadvance,cellconfig],9);}
+                             -> Check_mac2{check_MAC2=call(CheckMAC,mac2,MAC2_1);}
+                             -> if(check_MAC2==true){Compute_SessionKey{attach_success=true;
+                                                                       AppSKey=call(Aes128_encrypt,LongTermKey[i],[attachnonce,AttachEUI[k],devnonce],3,2);
+                                                                       FNwkSIntKey=call(Aes128_encrypt,NwkKey[i],[attachnonce,AttachEUI[k],devnonce],3,1);
+                                                                       SNwkSIntKey=call(Aes128_encrypt,NwkKey[i],[attachnonce,AttachEUI[k],devnonce],3,3);
+                                                                       NwkSEncKey=call(Aes128_encrypt,NwkKey[i],[attachnonce,AttachEUI[k],devnonce],3,4)}
+                                                      ->Skip}
+                                else{Skip};
+                                
+                                
+SM_Attach(i,j,k,InturderCond) = if (InturderCond) {SM_Attach_fake(i,j,k)} else {SM_Attach_com(i,j,k)};         
+
+SM_Attach_com(i,j,k) = ComUC[j+i*SM]?Attach_Request.attacheui.imsi.devnonce.mac1
+                   -> Check_DevNonce{if(devnonce > SMDevNonce){check_DevNonce=true}else{check_DevNonce=false};}
+                   -> if(check_DevNonce==true){Compute_mac1_1{MAC1_1=call(Aes128_cmac,NwkKey[i],[attacheui,imsi,devnonce],3);} 
+                                               -> Check_mac1{check_MAC1=call(CheckMAC,mac1,MAC1_1);} 
+                                                -> if(check_MAC1==true){RecordDevNonce{SMDevNonce=devnonce;} 
+                                                                        -> SM_Attach_com_2(i,j,k,devnonce)}
+                                                   else{Skip}}
+                     else{Skip};
+
+SM_Attach_fake(i,j,k) = FakeIC[j]?Attach_Request.attacheui.imsi.devnonce.mac1
+                    -> Check_DevNonce{if(devnonce > SMDevNonce){check_DevNonce=true}else{check_DevNonce=false};}
+                    -> if(check_DevNonce==true){Compute_mac1_1{MAC1_1=call(Aes128_cmac,NwkKey[i],[attacheui,imsi,devnonce],3);} 
+                                               -> Check_mac1{check_MAC1=call(CheckMAC,mac1,MAC1_1);} 
+                                                -> if(check_MAC1==true){RecordDevNonce{SMDevNonce=devnonce;} -> SM_Attach_fake_2(i,j,k,devnonce)}
+                                                   else{Skip}}
+                      else{Skip};
+                     
+SM_Attach_com_2(i,j,k,devnonce) = IncreaseAttachNonce{AttachNonce++;}
+                 -> Compute_SMIntKey{SMIntKey=call(Aes128_encrypt,NwkKey[i],[IMSI[i]],1,6);}
+                 -> Compute_mac2{MAC2=call(Aes128_cmac2,SMIntKey,[AttachType,AttachEUI[k],devnonce,AttachNonce,NetID[j],TMSI[i],AccessParameters,TimingAdvance,CellConfig],9);}
+                 -> ComUC[j+i*SM]!Attach_Accept.AesDecrypt.AttachNonce.NetID[j].TMSI[i].AccessParameters.TimingAdvance.CellConfig.MAC2
+                 -> Compute_SessionKey{AppSKey_SM=call(Aes128_encrypt,LongTermKey[i],[AttachNonce,AttachEUI[k],devnonce],3,2);
+                                       FNwkSIntKey_SM=call(Aes128_encrypt,NwkKey[i],[AttachNonce,AttachEUI[k],devnonce],3,1);
+                                       SNwkSIntKey_SM=call(Aes128_encrypt,NwkKey[i],[AttachNonce,AttachEUI[k],devnonce],3,3);
+                                       NwkSEncKey_SM=call(Aes128_encrypt,NwkKey[i],[AttachNonce,AttachEUI[k],devnonce],3,4)}
+                 -> ComSI[k+j*IOTP]!AppSKey_SM // 修改为发送到IOTP
+                 -> Skip;
+                 
+SM_Attach_fake_2(i,j,k,devnonce) = IncreaseAppNonce{AttachNonce++;}
+                 -> Compute_SMIntKey{SMIntKey=call(Aes128_encrypt,NwkKey[i],[IMSI[i]],1,6);}
+                 -> Compute_mac2{MAC2=call(Aes128_cmac2,SMIntKey,[AttachType,AttachEUI[k],devnonce,AttachNonce,NetID[j],TMSI[i],AccessParameters,TimingAdvance,CellConfig],9);}
+                 -> FakeIC[j]!Attach_Accept.AesDecrypt.AttachNonce.NetID[j].TMSI[i].AccessParameters.TimingAdvance.CellConfig.MAC2
+                 -> Compute_SessionKey{AppSKey_SM=call(Aes128_encrypt,LongTermKey[i],[AttachNonce,AttachEUI[k],devnonce],3,2);
+                                       FNwkSIntKey_SM=call(Aes128_encrypt,NwkKey[i],[AttachNonce,AttachEUI[k],devnonce],3,1);
+                                       SNwkSIntKey_SM=call(Aes128_encrypt,NwkKey[i],[AttachNonce,AttachEUI[k],devnonce],3,3);
+                                       NwkSEncKey_SM=call(Aes128_encrypt,NwkKey[i],[AttachNonce,AttachEUI[k],devnonce],3,4)}
+                 -> FakeII[k]!AppSKey_SM // 修改为发送到IOTP
+                 -> Skip;   
+
+// 添加IOTP_Attach过程 - 简单转发
+IOTP_Attach(i,j,k,l,InturderCond) = if (InturderCond) {IOTP_Attach_fake(i,j,k,l)} else {IOTP_Attach_com(i,j,k,l)};
+
+IOTP_Attach_com(i,j,k,l) = ComSI[k+j*IOTP]?appskey_sm      
+                         -> ComIA[l+k*AS]!appskey_sm                              
+                         -> Skip;
+
+IOTP_Attach_fake(i,j,k,l) = FakeII[k]?appskey_sm
+                          -> FakeIA[l]!appskey_sm
+                          -> Skip;
+
+// 修改AS_Attach以从IOTP接收
+AS_Attach(i,j,k) = (ComIA[k+j*AS]?appskey -> Skip) [] (FakeIA[k]?appskey -> Skip);
+
+/*Session Phase*/
+Initial(i,j) = InitialCnt{UESeqUp[i]=0; UESeqDown[i]=0; CNSeqUp[i]=0; CNSeqDown[i]=0;} -> Skip;
+
+//Model end-device during Session Phase         
+UE_Session(i,j,k,InturderCond1) = Compute_mac3{UESeqUp[i]++;ConfSeq[i]=UESeqDown[i];MAC3=call(Aes128_cmac2,FNwkSIntKey,[ConfirmData,UESeqUp[i],ConfSeq[i]],3)}
+                                -> if (InturderCond1) {UE_Session_fake(i,j,k)} else {UE_Session_com(i,j,k)};
+UE_Session_com(i,j,k) =  ComUC[j+i*SM]!AesEncrypt.AppSKey.ConfirmData.UESeqUp[i].ConfSeq[i].MAC3 -> (UE_Session_com_2(i,j,k) [] Skip);
+UE_Session_fake(i,j,k) = FakeIU[i]!AesEncrypt.AppSKey.ConfirmData.UESeqUp[i].ConfSeq[i].MAC3 -> (UE_Session_fake_2(i,j,k) [] Skip);
+                  
+UE_Session_com_2(i,j,k) = ComUC[j+i*SM]?AesDecrypt.appskey.response.smseqdown.mac4 -> UE_Session_com_3(i,j,k,response,smseqdown,mac4);
+UE_Session_fake_2(i,j,k) = FakeIU[i]?AesDecrypt.appskey.response.smseqdown.mac4 -> UE_Session_fake_3(i,j,k,response,smseqdown,mac4);
+
+UE_Session_com_3(i,j,k,response,smseqdown,mac4) = CheckFcnt{if(smseqdown-UESeqDown[i]<=MAX_SEQ_GAP){check_Seq=true}else{check_Seq=false};}
+					                    -> if(check_Seq==true){Compute_mac4_1{UESeqDown[i]=smseqdown; MAC4_1=call(Aes128_cmac2,SNwkSIntKey,[response,smseqdown,UESeqUp[i]],3)}
+				                                         -> Check_mac4{check_MAC4=call(CheckMAC,mac4,MAC4_1);availability=check_MAC4}
+					                                         -> Skip}
+					                       else{Skip};
+UE_Session_fake_3(i,j,k,response,smseqdown,mac4) = CheckFcnt{if(smseqdown-UESeqDown[i]<=MAX_SEQ_GAP){check_Seq=true}else{check_Seq=false};}
+					                    -> if(check_Seq==true){Compute_mac4_1{UESeqDown[i]=smseqdown; MAC4_1=call(Aes128_cmac2,SNwkSIntKey,[response,smseqdown,UESeqUp[i]],3)}
+					                                         -> Check_mac4{check_MAC4=call(CheckMAC,mac4,MAC4_1);availability=false}
+					                                         -> Skip}
+					                       else{Skip};                    
+
+SM_Session(i,j,k,InturderCond1,InturderCond2) = if (InturderCond1) {SM_Session_fake(i,j,k,InturderCond1,InturderCond2)} 
+                                                else {SM_Session_com(i,j,k,InturderCond1,InturderCond2)};
+SM_Session_com(i,j,k,InturderCond1,InturderCond2) = ComUC[j+i*SM]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3 
+                                                  -> SM_Session_2(i,j,k,appskey,confirmdata,uesequp,confseq,mac3,InturderCond1,InturderCond2);
+SM_Session_fake(i,j,k,InturderCond1,InturderCond2) = FakeIC[j]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3 
+                                                   -> SM_Session_2(i,j,k,appskey,confirmdata,uesequp,confseq,mac3,InturderCond1,InturderCond2);
+                  
+SM_Session_2(i,j,k,appskey,confirmdata,uesequp,confseq,mac3,InturderCond1,InturderCond2) = CheckSession{check_sessionKey=call(CheckSessionKey,appskey,AppSKey_SM);}
+                                                     -> CheckFcnt{if(uesequp-CNSeqUp[i]<=MAX_SEQ_GAP){check_Seq=true}else{check_Seq=false};}
+                                                     -> if(check_sessionKey==true&&check_Seq==true){Compute_mac3_1{CNSeqUp[i]=uesequp; MAC3_1=call(Aes128_cmac2,FNwkSIntKey,[confirmdata,uesequp,confseq],3)}
+                                                                         -> Check_mac3{check_MAC3=call(CheckMAC,mac3,MAC3_1);}
+                                                                         -> if(check_MAC3==true){(if(InturderCond2) {SM_Session_fake_2(i,j,k,confirmdata,uesequp,confseq,mac3,InturderCond1)}
+                                                                                                  else {SM_Session_com_2(i,j,k,confirmdata,uesequp,confseq,mac3,InturderCond1)})}
+                                                                            else{
+                                                                              CheckTamperingAttack{successtamperingattack=false; tamperingattack_detected=true;} 
+                                                                              -> SM_Session_invalid_mac(i,j,k,InturderCond1)
+                                                                            }}
+                                                        else{
+                                                          CheckTamperingAttack{successtamperingattack=false; tamperingattack_detected=true;}
+                                                          -> SM_Session_invalid_mac(i,j,k,InturderCond1)
+                                                        };
+
+// 添加处理MAC无效的情况
+SM_Session_invalid_mac(i,j,k,InturderCond1) = Compute_mac4{CNSeqDown[i]++; MAC4=call(Aes128_cmac2,SNwkSIntKey,[Response,CNSeqDown[i],0],3)}
+                                            -> Skip; // 不发送响应，直接终止处理
+
+// 修改SM_Session_com_2, 通过IOTP
+SM_Session_com_2(i,j,k,confirmdata,uesequp,confseq,mac3,InturderCond1) = ComSI[k+j*IOTP]!AesEncrypt.AppSKey.confirmdata.uesequp.confseq.mac3  
+                                                                        -> (SM_Session_com2_2(i,j,k,uesequp,InturderCond1) [] Skip);
+SM_Session_fake_2(i,j,k,confirmdata,uesequp,confseq,mac3,InturderCond1) = FakeII[k]!AesEncrypt.AppSKey.confirmdata.uesequp.confseq.mac3 
+                                                                         -> (SM_Session_fake2_2(i,j,k,uesequp,InturderCond1) [] Skip);
+                                                           
+// 修改SM_Session_com2_2, 从IOTP接收
+SM_Session_com2_2(i,j,k,uesequp,InturderCond1) = ComSI[k+j*IOTP]?AesDecrypt.appskey.Response
+                             -> Compute_mac4{CNSeqDown[i]++; ConfSeq[i]=uesequp; MAC4=call(Aes128_cmac2,SNwkSIntKey,[Response,CNSeqDown[i],ConfSeq[i]],3)}
+                             -> if (InturderCond1) {SM_Session_fake2_3(i,j,k,MAC4)} else {SM_Session_com2_3(i,j,k,MAC4)};
+SM_Session_fake2_2(i,j,k,uesequp,InturderCond1) = FakeII[k]?AesDecrypt.appskey.Response
+                                          -> Compute_mac4{CNSeqDown[i]++; ConfSeq[i]=uesequp; MAC4=call(Aes128_cmac2,SNwkSIntKey,[Response,CNSeqDown[i],ConfSeq[i]],3)}
+                                          -> if(InturderCond1) {SM_Session_fake2_3(i,j,k,MAC4)} else {SM_Session_com2_3(i,j,k,MAC4)};
+                                          
+SM_Session_com2_3(i,j,k,mac4) = ComUC[j+i*SM]!AesDecrypt.AppSKey.Response.CNSeqDown[i].mac4 -> Skip;
+SM_Session_fake2_3(i,j,k,mac4) = FakeIC[j]!AesDecrypt.AppSKey.Response.CNSeqDown[i].mac4 -> Skip;
+
+// 添加IOTP_Session过程 - 简单转发
+IOTP_Session(i,j,k,l,InturderCond1,InturderCond2) = 
+    if (InturderCond1) {
+        IOTP_Session_fake(i,j,k,l)
+    } else {
+        IOTP_Session_com(i,j,k,l)
+    };
+
+IOTP_Session_com(i,j,k,l) = 
+    ((ComSI[k+j*IOTP]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3 
+    -> ComIA[l+k*AS]!AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+    -> ComIA[l+k*AS]?AesDecrypt.appskey.response
+    -> ComSI[k+j*IOTP]!AesDecrypt.appskey.response
+    -> Skip)
+    []
+    (ComSI[k+j*IOTP]?AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3
+    -> ComIA[l+k*AS]!AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3
+    -> ComIA[l+k*AS]?AesDecrypt.appskey.response
+    -> ComSI[k+j*IOTP]!AesDecrypt.appskey.response
+    -> Skip))
+    []
+    Skip;
+                                                      
+IOTP_Session_fake(i,j,k,l) = 
+    ((FakeII[k]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+    -> FakeIA[l]!AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+    -> FakeIA[l]?AesDecrypt.appskey.response
+    -> FakeII[k]!AesDecrypt.appskey.response
+    -> Skip)
+    []
+    (FakeII[k]?AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3
+    -> FakeIA[l]!AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3
+    -> FakeIA[l]?AesDecrypt.appskey.response
+    -> FakeII[k]!AesDecrypt.appskey.response
+    -> Skip))
+    []
+    Skip;
+
+// 修改AS_Session以与IOTP通信
+AS_Session(i,j,k,InturderCond2)= if (InturderCond2) {AS_Session_3(i,j,k) [] Skip} else {AS_Session_2(i,j,k) [] Skip};                 
+AS_Session_2(i,j,k) = 
+    ((ComIA[k+j*AS]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+    -> ComIA[k+j*AS]!AesDecrypt.AppSKey_SM.Response
+    -> Skip)
+    []
+    (ComIA[k+j*AS]?AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3
+    -> ComIA[k+j*AS]!AesDecrypt.AppSKey_SM.Response
+    -> Skip))
+    []
+    Skip;
+                    
+AS_Session_3(i,j,k) = 
+    ((FakeIA[k]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+    -> FakeIA[k]!AesDecrypt.AppSKey_SM.Response
+    -> Skip)
+    []
+    (FakeIA[k]?AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3
+    -> FakeIA[k]!AesDecrypt.AppSKey_SM.Response
+    -> Skip))
+    []
+    Skip;			
+
+/*Intruder Modeling*/
+//Replay attacks
+Replay_AttachRequest(i,j) = FakeIU[i]?Attach_Request.appid.imsi.devnonce.mac1
+                        ->FakeIC[j]!Attach_Request.appid.imsi.oldDevNonce.mac1
+                        ->(Replay_AttachAccept(i,j) [] Skip);
+                        
+Replay_AttachRequest_sub(i,j) = FakeIC[j]?Attach_Accept.AesDecrypt.appnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2
+                            -> CheckReplayAttack{successreplayattack=true;} -> Skip;
+
+Replay_AttachAccept(i,j) = FakeIC[j]?Attach_Accept.AesDecrypt.appnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2
+                       -> FakeIU[i]!Attach_Accept.AesDecrypt.appnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2
+                       -> CheckReplayAttack{successreplayattack=true;} 
+                       -> Skip;
+
+Intruder_ReplayAttack_Attach(i,j) = Replay_AttachRequest(i,j);
+                       
+Replay_Session(i,j) = FakeIU[i]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+                    -> FakeIC[j]!AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+                    -> (Replay_Session_sub(i,j) [] Skip);
+                    
+Replay_Session_sub(i,j) = FakeIC[j]?AesDecrypt.appskey.response.smseqdown.mac4
+                        -> FakeIU[i]!AesDecrypt.appskey.response.smseqdown.mac4
+                        -> CheckReplayAttack{successreplayattack=true;} -> Skip;
+
+Intruder_ReplayAttack_Session(i,j) = Replay_Session(i,j);                      
+
+//Dos attacks
+Intruder_DosAttack(i,j) = FakeIU[i]?Attach_Request.appid.imsi.devnonce.mac1
+                        -> FakeIC[j]!Attach_Request.appid.imsi.devnonce.mac1
+                        -> (Intruder_DosAttack_sub(i,j) [] Skip);
+
+Intruder_DosAttack_sub(i,j) = FakeIC[j]?Attach_Accept.AesDecrypt.appnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2
+                           -> FakeIU[i]!Attach_Accept.AesDecrypt.appnonce.netid.tmsi.accessparameters.timingadvance.cellconfig.mac2
+                           -> CheckDoSAttack{successdosattack=true; availability=false;} 
+                           -> Skip;
+                           
+//Bit Flipping attacks
+Intruder_BitFlippingAttack(j,k,l) = FakeIC[j]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3 
+                                -> BitFlip{successbitflipattack=true;}
+                                -> FakeII[k]!AesEncrypt.appskey.ChangeData.uesequp.confseq.mac3 
+                                -> (Intruder_BitFlippingAttack_sub(j,k) [] Skip);
+                                
+Intruder_BitFlippingAttack_sub(j,k) = FakeII[k]?AesDecrypt.appskey.response
+                                    -> FakeIC[j]!AesDecrypt.appskey.response
+                                    -> Skip;
+                                    
+//Response Spoofing attacks
+Intruder_ResponseSpoofingAttack(i,j) = FakeIU[i]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+                               -> FakeIC[j]!AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+                               -> FakeIC[j]?AesDecrypt.appskey.response.smseqdown.mac4
+                               -> FakeIU[i]!AesDecrypt.appskey.smseqdown.mac4
+                               -> CheckResponseSpoofingAttack{successresponsespoofattack=true;} 
+                               -> Skip; 
+
+//Tampering attacks
+Intruder_TamperingAttack(i,j,k) = 
+    // 1. 接收消息
+    FakeIU[i]?AesEncrypt.appskey.confirmdata.uesequp.confseq.mac3
+    // 2. 修改数据但不改变MAC（这是篡改攻击的关键）
+    -> ModifyData{
+        tamperedSeq = uesequp + 1;
+        successtamperingattack = false; // 初始设为false，只有在没有被检测到时才会变为true
+    } 
+    // 3. 发送修改后的消息（序列号被修改，但MAC没变）
+    -> FakeIC[j]!AesEncrypt.appskey.confirmdata.tamperedSeq.confseq.mac3
+    // 4. 等待响应（但在检测到篡改后不会收到响应）
+    -> ((FakeIC[j]?AesDecrypt.appskey.response.smseqdown.mac4
+        -> FakeIU[i]!AesDecrypt.appskey.response.smseqdown.mac4
+        -> CheckTamperingAttackResult{successtamperingattack=true;} // 如果收到正常响应，说明攻击成功
+        -> Skip)
+        []
+        Skip); // 允许不接收响应的情况，避免死锁
+
+// 更新NBIoT_Attach和NBIoT_Session_2以添加IOTP
+NBIoT_Attach(i,j,k,l,InturderCond) = UE_Attach(i,j,k,InturderCond) || SM_Attach(i,j,k,InturderCond) || IOTP_Attach(i,j,k,l,InturderCond) || AS_Attach(i,j,k);
+NBIoT_Session_2(i,j,k,l,InturderCond1,InturderCond2) = UE_Session(i,j,k,InturderCond1) || SM_Session(i,j,k,InturderCond1,InturderCond2) || IOTP_Session(i,j,k,l,InturderCond1,InturderCond2) || AS_Session(i,j,k,InturderCond2);
+NBIoT_Session(i,j,k,l,InturderCond1,InturderCond2)=NBIoT_Session_2(i,j,k,l,InturderCond1,InturderCond2);
+
+NBIoT_v11() = |||i:{0..1-1}; j:{0..SM-1}; k:{0..IOTP-1};l:{0..AS-1}@(NBIoT_Attach(i,j,k,l,false);if(attach_success==true){NBIoT_Session(i,j,k,l,false,false)}else{Skip});   
+
+NBIoT_v11_ReplayAttack() = ((NBIoT_Attach(UE-2,SM-1,IOTP-1,AS-1,true) || Intruder_ReplayAttack_Attach(UE-2,SM-1));
+                            if(attach_success==true){
+                              (NBIoT_Session(UE-2,SM-1,IOTP-1,AS-1,true,false) || 
+                               Intruder_ReplayAttack_Session(UE-2,SM-1))
+                            }else{Skip});
+                            
+NBIoT_v11_DosAttack() = ((NBIoT_Attach(UE-2,SM-1,IOTP-1,AS-1,true) || Intruder_DosAttack(UE-2,SM-1));
+                          if(attach_success==true){
+                            NBIoT_Session(UE-2,SM-1,IOTP-1,AS-1,false,false)
+                          }else{Skip});
+                          
+NBIoT_v11_BitFlippingAttack() = (NBIoT_Attach(UE-2,SM-1,IOTP-1,AS-1,false);
+                               if(attach_success==true){
+                                 NBIoT_Session(UE-2,SM-1,IOTP-1,AS-1,false,true) || 
+                                 Intruder_BitFlippingAttack(SM-1,IOTP-1,AS-1)
+                               }else{Skip});
+                               
+NBIoT_v11_ResponseSpoofingAttack() = (NBIoT_Attach(UE-2,SM-1,IOTP-1,AS-1,false);
+                                    if(attach_success==true){
+                                      NBIoT_Session(UE-2,SM-1,IOTP-1,AS-1,true,false) ||
+                                      Intruder_ResponseSpoofingAttack(UE-2,SM-1)
+                                    }else{Skip});
+
+NBIoT_v11_TamperingAttack() = (NBIoT_Attach(UE-2,SM-1,IOTP-1,AS-1,false);
+                             if(attach_success==true){
+                               NBIoT_Session(UE-2,SM-1,IOTP-1,AS-1,true,false) ||
+                               Intruder_TamperingAttack(UE-2,SM-1,IOTP-1)
+                             }else{Skip});
+
+/*fundamental properties*/
+#define Integrity(check_MAC1==true && check_MAC2==true && check_MAC3==true && check_MAC4==true && check_MAC5==true);
+#define SessionKey_Consistency(check_sessionKey==true);
+#define Availability(availability==true);
+#define Confidentiality(successdataleakage==false);
+
+/*security properties*/
+#define SuccessRelayAttack (successreplayattack==true);
+#define SuccessResponseSpoofingAttack (successresponsespoofattack==true);
+#define SuccessDoSAttack (successdosattack==true);
+#define SuccessBitFlippingAttack (successbitflipattack==true);
+#define SuccessTamperingAttack (successtamperingattack==true);
+#define TamperingAttackDetected (tamperingattack_detected==true);
+
+//v11 NBIoT
+#assert NBIoT_v11() deadlockfree;
+#assert NBIoT_v11() divergencefree;
+#assert NBIoT_v11() |= []Integrity;
+#assert NBIoT_v11() |= []SessionKey_Consistency;
+#assert NBIoT_v11() |= []<>Availability;
+#assert NBIoT_v11() |= []Confidentiality;
+//with Replay Attacks
+#assert NBIoT_v11_ReplayAttack() deadlockfree;
+#assert NBIoT_v11_ReplayAttack() reaches SuccessRelayAttack;
+#assert NBIoT_v11_ReplayAttack() |= []!SuccessRelayAttack;
+#assert NBIoT_v11_ReplayAttack() |= []Integrity;
+#assert NBIoT_v11_ReplayAttack() |= []SessionKey_Consistency;
+#assert NBIoT_v11_ReplayAttack() |= []<>Availability;
+#assert NBIoT_v11_ReplayAttack() |= []Confidentiality;
+//with Dos Attacks
+#assert NBIoT_v11_DosAttack() deadlockfree;
+#assert NBIoT_v11_DosAttack() reaches SuccessDoSAttack;
+#assert NBIoT_v11_DosAttack() |= []!SuccessDoSAttack;
+#assert NBIoT_v11_DosAttack() |= []Integrity;
+#assert NBIoT_v11_DosAttack() |= []SessionKey_Consistency;
+#assert NBIoT_v11_DosAttack() |= []<>Availability;
+#assert NBIoT_v11_DosAttack() |= []Confidentiality;
+//with Bit Flipping Attacks
+#assert NBIoT_v11_BitFlippingAttack() deadlockfree;
+#assert NBIoT_v11_BitFlippingAttack() reaches SuccessBitFlippingAttack;
+#assert NBIoT_v11_BitFlippingAttack() |= []!SuccessBitFlippingAttack;
+#assert NBIoT_v11_BitFlippingAttack() |= []Integrity;
+#assert NBIoT_v11_BitFlippingAttack() |= []SessionKey_Consistency;
+#assert NBIoT_v11_BitFlippingAttack() |= []<>Availability;
+#assert NBIoT_v11_BitFlippingAttack() |= []Confidentiality;
+//with Response Spoofing Attacks
+#assert NBIoT_v11_ResponseSpoofingAttack() deadlockfree;
+#assert NBIoT_v11_ResponseSpoofingAttack() reaches SuccessResponseSpoofingAttack;
+#assert NBIoT_v11_ResponseSpoofingAttack() |= []!SuccessResponseSpoofingAttack;
+#assert NBIoT_v11_ResponseSpoofingAttack() |= []Integrity;
+#assert NBIoT_v11_ResponseSpoofingAttack() |= []SessionKey_Consistency;
+#assert NBIoT_v11_ResponseSpoofingAttack() |= []<>Availability;
+#assert NBIoT_v11_ResponseSpoofingAttack() |= []Confidentiality;
+//with Tampering Attacks
+#assert NBIoT_v11_TamperingAttack() deadlockfree;
+#assert NBIoT_v11_TamperingAttack() reaches SuccessTamperingAttack;
+#assert NBIoT_v11_TamperingAttack() |= []!SuccessTamperingAttack;
+#assert NBIoT_v11_TamperingAttack() |= []Integrity;
+#assert NBIoT_v11_TamperingAttack() |= []SessionKey_Consistency;
+#assert NBIoT_v11_TamperingAttack() |= []<>Availability;
+#assert NBIoT_v11_TamperingAttack() |= []Confidentiality;
+
